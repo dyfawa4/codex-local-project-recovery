@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace Clpr.Core;
 
 public sealed record Operation(string Id, string Target, string BeforeHash, string AfterHash, string[] Fields,
-    int Projects, int Assignments, DateTime CreatedUtc, Dictionary<string, string> BackupHashes, string ToolVersion = "1.0.0");
+    int Projects, int Assignments, DateTime CreatedUtc, Dictionary<string, string> BackupHashes, string ToolVersion = "1.1.0");
 
 public sealed class RecoveryEngine
 {
@@ -67,15 +67,19 @@ public sealed class RecoveryEngine
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }
-    public string Apply(RecoveryPlan plan, string backupRoot, string confirmation)
+    public string Apply(RecoveryPlan plan, string backupRoot, string confirmation, bool allowOverwrite = false)
     {
         if (confirmation != plan.Confirmation) throw new RecoveryException("尚未确认此预览。");
         if (!plan.CanApply) throw new RecoveryException(string.Join("\n", plan.Blockers));
         SafePath(plan.Target); SafePath(plan.Source); SafePath(backupRoot); Closed();
         using var mutex = Lock(plan.Target);
-        var fresh = Planner.Create(plan.Source, plan.Target);
+        var fresh = Planner.Create(plan.Source, plan.Target, allowOverwrite);
+        if (fresh.RequiresOverwrite && !allowOverwrite)
+            throw new RecoveryException("目标已有项目或聊天归属，写入前需要确认覆盖。");
         if (!fresh.CanApply || fresh.SourceHash != plan.SourceHash || fresh.TargetHash != plan.TargetHash)
             throw new RecoveryException("计划已过期或不再可用，请重新预览。");
+        if (confirmation != fresh.Confirmation || fresh.RequiresOverwrite != plan.RequiresOverwrite)
+            throw new RecoveryException("确认与当前计划不一致，请重新预览。");
         var payload = Planner.Candidate(fresh);
         var afterHash = State.Hash(payload);
         var dir = Path.Combine(Path.GetFullPath(backupRoot), DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N"));
@@ -97,7 +101,8 @@ public sealed class RecoveryEngine
             Expect(file, hashes[name!]); Expect(Path.Combine(dir, name!), hashes[name!]);
         }
         if (!hashes.TryGetValue(State.LiveName, out var original) || original != plan.TargetHash) throw new RecoveryException("备份目标哈希不匹配。");
-        var op = new Operation(Path.GetFileName(dir), plan.Target, plan.TargetHash, afterHash, State.Fields.ToArray(),
+        var fields = State.Fields.Concat(fresh.ChangedFields.Where(Planner.ReferenceFields.Contains)).ToArray();
+        var op = new Operation(Path.GetFileName(dir), plan.Target, plan.TargetHash, afterHash, fields,
             fresh.SourceProjects, fresh.SourceAssignments, DateTime.UtcNow, hashes);
         WriteNew(Path.Combine(dir, "candidate.json"), payload);
         Save(Path.Combine(dir, "manifest.json"), op); // Durable recovery record BEFORE touching live.
@@ -133,7 +138,8 @@ public sealed class RecoveryEngine
     public static Operation ReadOperation(string manifest)
     {
         var op = JsonSerializer.Deserialize<Operation>(File.ReadAllBytes(manifest)) ?? throw new RecoveryException("操作记录无效。");
-        if (Path.GetFileName(op.Target) != State.LiveName || !op.Fields.SequenceEqual(State.Fields) ||
+        if (Path.GetFileName(op.Target) != State.LiveName || !op.Fields.Take(State.Fields.Length).SequenceEqual(State.Fields) ||
+            op.Fields.Distinct().Count() != op.Fields.Length || op.Fields.Skip(State.Fields.Length).Any(f => !Planner.ReferenceFields.Contains(f)) ||
             op.BeforeHash.Length != 64 || op.AfterHash.Length != 64) throw new RecoveryException("操作记录结构无效。");
         return op;
     }

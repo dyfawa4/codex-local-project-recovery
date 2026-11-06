@@ -5,7 +5,9 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Clpr.Core;
+using Microsoft.VisualBasic.FileIO;
 using Microsoft.Win32;
+using SearchOption = System.IO.SearchOption;
 
 namespace Clpr.Desktop;
 
@@ -33,6 +35,7 @@ public partial class MainWindow : Window
     string sourceStamp = "", targetStamp = "";
     string[] running = [];
     string Work => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CLPR");
+    string SnapshotRoot => Path.Combine(Work, "snapshots");
     string Target => Path.Combine(HomeBox.Text.Trim(), State.LiveName);
     SnapshotRow? Selected => SnapshotsGrid.SelectedItem as SnapshotRow;
 
@@ -78,7 +81,7 @@ public partial class MainWindow : Window
         }
         (PageTitle.Text, PageSubtitle.Text) = page switch
         {
-            "restore" => ("恢复项目", "选快照 → 生成预览 → 恢复。检查通过后直接点击恢复，无需切换模式。"),
+            "restore" => ("恢复项目", "选择快照并生成预览。当前已有项目时，可确认用所选快照覆盖。"),
             "history" => ("操作记录", "每次恢复都会自动备份。需要撤销时，在这里选择对应操作。"),
             _ => ("状态与备份", "项目正常时保存一份快照，下次切号后就有据可恢复。")
         };
@@ -95,12 +98,19 @@ public partial class MainWindow : Window
     {
         if (!initialized) return;
         ApplyButton.IsEnabled = !busy && plan?.CanApply == true;
+        ApplyButton.Content = plan?.RequiresOverwrite == true ? "覆盖当前项目" : "恢复项目";
         PreviewButton.IsEnabled = !busy && Selected != null;
+        DeleteSnapshotButton.IsEnabled = !busy && Selected != null && ManagedSnapshotDirectory(Selected.Snapshot.Path) != null;
         ExportButton.IsEnabled = !busy && plan != null;
         RollbackButton.IsEnabled = !busy && HistoryGrid.SelectedItem is HistoryRow row && row.Status == "可回滚";
-        RecoveryHint.Text = plan?.CanApply == true
-            ? running.Length > 0 ? "预览已通过。请先完全退出 Codex，再点击恢复；备份会自动完成。" : "预览已通过，可以直接恢复。写入前自动备份，可在操作记录中回滚。"
-            : plan != null ? "预览发现问题，请查看上方原因并重新选择快照。" : "请先完成预览。恢复前会自动备份，可在操作记录中回滚。";
+        RecoveryHint.Text = plan switch
+        {
+            { CanApply: true } when running.Length > 0 => "预览已通过。请先完全退出 Codex，再执行操作。",
+            { CanApply: true, RequiresOverwrite: true } => "可覆盖。确认后会用快照替换当前项目和聊天归属，覆盖前自动备份。",
+            { CanApply: true } => "预览已通过，可以直接恢复。写入前自动备份，可在操作记录中回滚。",
+            null => "请先完成预览。写入前自动备份，可在操作记录中回滚。",
+            _ => "请查看上方的预览结果。"
+        };
     }
     void InvalidatePreview(string message = "选择快照后点击预览，程序会检查差异和项目关联。", bool notify = false)
     {
@@ -135,13 +145,54 @@ public partial class MainWindow : Window
     }
     SnapshotRow ToRow(Snapshot s)
     {
-        var savedRoot = Path.Combine(Work, "snapshots") + Path.DirectorySeparatorChar;
         var filename = Path.GetFileName(s.Path);
-        var label = s.Path.StartsWith(savedRoot, StringComparison.OrdinalIgnoreCase) ? "已保存快照"
+        var label = ManagedSnapshotDirectory(s.Path) != null ? "已保存快照"
             : filename == State.LiveName + ".bak" ? "Codex 自动备份"
             : filename.Contains(".tmp", StringComparison.OrdinalIgnoreCase) ? "历史临时快照"
             : filename == "account1-good.json" ? "旧版正常备份" : "导入 · " + filename;
         return new SnapshotRow(s, label);
+    }
+    string? ManagedSnapshotDirectory(string snapshot)
+    {
+        var dir = Path.GetDirectoryName(snapshot);
+        if (dir == null || !Path.GetFileName(snapshot).Equals(State.LiveName, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetDirectoryName(dir), SnapshotRoot, StringComparison.OrdinalIgnoreCase))
+            return null;
+        const string prefix = "snapshot-";
+        var name = Path.GetFileName(dir);
+        return name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+            Guid.TryParseExact(name[prefix.Length..], "N", out _) ? dir : null;
+    }
+
+    async void DeleteSnapshotClick(object sender, RoutedEventArgs e)
+    {
+        if (Selected is not { } selected || ManagedSnapshotDirectory(selected.Snapshot.Path) is not { } dir) return;
+        var message = $"将 {selected.Time} 保存的快照移到回收站？\n\n{selected.Projects} 个项目 / {selected.Assignments} 条聊天归属";
+        if (MessageBox.Show(this, message, "删除所选快照", MessageBoxButton.OKCancel,
+            MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+        await Run("正在清理所选快照…", async () =>
+        {
+            if (Path.GetFullPath(Target).Equals(selected.Snapshot.Path, StringComparison.OrdinalIgnoreCase))
+                throw new RecoveryException("所选快照是当前目标文件，请先切换数据目录。");
+            await Task.Run(() =>
+            {
+                for (var path = dir; path != null; path = Path.GetDirectoryName(path))
+                    if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                        throw new RecoveryException("快照目录经过链接，无法清理。");
+                foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
+                    if ((Path.GetFileName(entry) is not (State.LiveName or "snapshot.json")) ||
+                        (File.GetAttributes(entry) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                        throw new RecoveryException("快照目录含有其他文件，请手动检查。");
+                FileSystem.DeleteDirectory(dir, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin, UICancelOption.ThrowException);
+                if (Directory.Exists(dir)) throw new RecoveryException("快照未移到回收站。");
+            });
+            var rows = (SnapshotsGrid.ItemsSource as SnapshotRow[] ?? [])
+                .Where(row => !row.Snapshot.Path.Equals(selected.Snapshot.Path, StringComparison.OrdinalIgnoreCase)).ToArray();
+            SnapshotsGrid.ItemsSource = rows;
+            SnapshotsGrid.SelectedItem = rows.FirstOrDefault(row => row.Snapshot.Valid && row.Projects > 0);
+            CandidatesText.Text = rows.Count(row => row.Snapshot.Valid && row.Projects > 0).ToString();
+            StatusText.Text = "所选快照已移到回收站。";
+        });
     }
     async Task Scan()
     {
@@ -199,15 +250,18 @@ public partial class MainWindow : Window
             var source = Selected?.Snapshot.Path ?? throw new RecoveryException("请先选择正常快照。"); var target = Target;
             InvalidatePreview();
             var beforeSource = Stamp(source); var beforeTarget = Stamp(target);
-            var result = await Task.Run(() => Planner.Create(source, target));
+            var result = await Task.Run(() => Planner.Create(source, target, allowOverwrite: true));
             if (Stamp(source) != beforeSource || Stamp(target) != beforeTarget) throw new RecoveryException("预览期间状态变化，请重新预览。");
             plan = result; sourceStamp = beforeSource; targetStamp = beforeTarget;
-            PreviewCounts.Text = $"来源 {plan.SourceProjects} 项目 / {plan.SourceAssignments} 归属   →   当前 {plan.TargetProjects} 项目 / {plan.TargetAssignments} 归属";
-            PreviewDetails.Text = plan.CanApply
-                ? $"检查通过 · 将找回 {plan.AddedProjects} 个项目。项目冲突 {plan.ProjectConflicts}，聊天归属冲突 {plan.AssignmentConflicts}。\n账号登录、其他设置和源码保持原样。现在可以点击下方“恢复项目”。"
-                : "暂不恢复：\n" + string.Join("\n", plan.Blockers);
+            PreviewCounts.Text = $"当前 {plan.TargetProjects} 项目 / {plan.TargetAssignments} 归属  →  快照 {plan.SourceProjects} 项目 / {plan.SourceAssignments} 归属";
+            PreviewDetails.Text = plan switch
+            {
+                { CanApply: false } => "暂不恢复：\n" + string.Join("\n", plan.Blockers),
+                { RequiresOverwrite: true } => $"项目：新增 {plan.AddedProjects}，替换 {plan.ProjectConflicts}，移除 {plan.RemovedProjects}。\n聊天归属：新增 {plan.AddedAssignments}，替换 {plan.AssignmentConflicts}，移除 {plan.RemovedAssignments}。",
+                _ => $"检查通过 · 将恢复 {plan.SourceProjects} 个项目和 {plan.SourceAssignments} 条聊天归属。"
+            };
             TechnicalDetails.Text = $"来源：{plan.Source}\n目标：{plan.Target}\n将改变：{string.Join("、", plan.ChangedFields)}\n来源 SHA-256：{plan.SourceHash}\n目标 SHA-256：{plan.TargetHash}\n数据库仅备份，不验证数据库 ID；文件恢复后需检查 Codex 显示。";
-            StatusText.Text = plan.CanApply ? "预览检查通过 · 恢复按钮已启用" : "预览未通过 · 请查看原因，恢复按钮保持禁用";
+            StatusText.Text = plan.CanApply ? "预览检查通过" : "请查看预览结果";
         });
     }
     async void SnapshotClick(object sender, RoutedEventArgs e)
@@ -245,11 +299,19 @@ public partial class MainWindow : Window
     }
     async void ApplyClick(object sender, RoutedEventArgs e)
     {
-        await Run("正在自动备份并恢复，请稍候…", async () =>
+        if (plan is not { CanApply: true } selected) return;
+        if (selected.RequiresOverwrite)
         {
-            if (plan?.CanApply != true) throw new RecoveryException("请先完成恢复预览。");
-            var selected = plan; var root = Work;
-            var manifest = await Task.Run(() => engine.Apply(selected, Path.Combine(root, "operations"), selected.Confirmation));
+            var message = $"用所选快照覆盖当前项目和聊天归属？\n\n当前：{selected.TargetProjects} 个项目 / {selected.TargetAssignments} 条归属\n覆盖后：{selected.SourceProjects} 个项目 / {selected.SourceAssignments} 条归属\n\n仅存在于当前状态中的 {selected.RemovedProjects} 个项目和 {selected.RemovedAssignments} 条归属将从列表中移除。覆盖前会备份当前状态。";
+            if (MessageBox.Show(this, message, "确认覆盖当前项目", MessageBoxButton.OKCancel,
+                MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+        }
+        if (plan != selected) return;
+        await Run("正在自动备份并写入，请稍候…", async () =>
+        {
+            var root = Work;
+            var manifest = await Task.Run(() => engine.Apply(selected, Path.Combine(root, "operations"),
+                selected.Confirmation, allowOverwrite: selected.RequiresOverwrite));
             InvalidatePreview();
             PreviewCounts.Text = $"已恢复 {selected.SourceProjects} 个项目 / {selected.SourceAssignments} 条聊天归属";
             PreviewDetails.Text = "文件级恢复完成。请重新打开 Codex 检查项目显示。\n备份已自动保存；如需撤销，可前往左侧“操作记录”回滚。";

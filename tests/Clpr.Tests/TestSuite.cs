@@ -39,6 +39,74 @@ foreach (var (n, m) in new[] { (1, 1), (22, 46), (37, 99), (6, 10), (200, 321) }
 Test("zero source blocked", () => { var f = Setup(0, 0); Assert(!Planner.Create(f.Source, f.Target).CanApply); });
 Test("nonempty target blocked", () => { var f = Setup(22, 46, 3, 5); Assert(!Planner.Create(f.Source, f.Target).CanApply); });
 Test("older smaller source cannot replace new target", () => { var f = Setup(20, 30, 50, 60); Assert(!Planner.Create(f.Source, f.Target).CanApply); });
+Test("explicit overwrite restores a more complete snapshot", () =>
+{
+    var f = Setup(27, 57, 23, 51);
+    var original = State.HashFile(f.Target);
+    var plan = Planner.Create(f.Source, f.Target, allowOverwrite: true);
+    Assert(plan.CanApply && plan.RequiresOverwrite && plan.AddedProjects == 4 && plan.AddedAssignments == 6);
+    Throws(() => engine.Apply(plan, f.Backups, plan.Confirmation));
+    Assert(State.HashFile(f.Target) == original);
+    var manifest = engine.Apply(plan, f.Backups, plan.Confirmation, allowOverwrite: true);
+    Assert(RecoveryEngine.Verify(manifest) && State.Inspect(f.Target).Assignments == 57);
+    engine.Rollback(manifest, true);
+    Assert(State.HashFile(f.Target) == original);
+});
+Test("overwrite a smaller snapshot and remove stale references", () =>
+{
+    var f = Setup(2, 3, 3, 4);
+    var target = Data(3, 4);
+    target["pinned-project-ids"] = new JsonArray("p0", "p2");
+    target["sidebar-project-thread-orders"] = new JsonObject
+    {
+        ["p0"] = new JsonObject { ["threadIds"] = new JsonArray("t0") },
+        ["p2"] = new JsonObject { ["threadIds"] = new JsonArray("t2") }
+    };
+    Write(f.Target, target);
+    var original = State.HashFile(f.Target);
+    var plan = Planner.Create(f.Source, f.Target, allowOverwrite: true);
+    Assert(plan.CanApply && plan.RemovedProjects == 1 && plan.RemovedAssignments == 1);
+    var manifest = engine.Apply(plan, f.Backups, plan.Confirmation, allowOverwrite: true);
+    var actual = State.Parse(File.ReadAllBytes(f.Target));
+    Assert(RecoveryEngine.Verify(manifest));
+    Assert(JsonNode.DeepEquals(actual["pinned-project-ids"], new JsonArray("p0")));
+    Assert(((JsonObject)actual["sidebar-project-thread-orders"]!).ContainsKey("p0"));
+    Assert(!((JsonObject)actual["sidebar-project-thread-orders"]!).ContainsKey("p2"));
+    Assert(JsonNode.DeepEquals(target["unrelated"], actual["unrelated"]));
+    engine.Rollback(manifest, true);
+    Assert(State.HashFile(f.Target) == original);
+});
+Test("overwrite reconciles a restored chat previously marked projectless", () =>
+{
+    var f = Setup(3, 4, 1, 1);
+    var target = Data(1, 1);
+    target["projectless-thread-ids"] = new JsonArray("t1", "other-thread");
+    Write(f.Target, target);
+    var plan = Planner.Create(f.Source, f.Target, allowOverwrite: true);
+    Assert(plan.CanApply && plan.ChangedFields.Contains("projectless-thread-ids"));
+    engine.Apply(plan, f.Backups, plan.Confirmation, allowOverwrite: true);
+    var actual = State.Parse(File.ReadAllBytes(f.Target));
+    Assert(JsonNode.DeepEquals(actual["projectless-thread-ids"], new JsonArray("other-thread")));
+});
+Test("overwrite checks original target hash and confirmation", () =>
+{
+    var f = Setup(3, 4, 1, 1);
+    var plan = Planner.Create(f.Source, f.Target, allowOverwrite: true);
+    Throws(() => engine.Apply(plan, f.Backups, "RESTORE 3 PROJECTS", allowOverwrite: true));
+    File.AppendAllText(f.Target, " ");
+    var newerHash = State.HashFile(f.Target);
+    Throws(() => engine.Apply(plan, f.Backups, plan.Confirmation, allowOverwrite: true));
+    Assert(State.HashFile(f.Target) == newerHash);
+});
+Test("overwrite blocks identical and invalid project data", () =>
+{
+    var f = Setup(3, 4, 3, 4);
+    Assert(!Planner.Create(f.Source, f.Target, allowOverwrite: true).CanApply);
+    var bad = Data(3, 4);
+    bad[State.Fields[3]]!["t0"]!["projectId"] = "absent";
+    Write(f.Source, bad);
+    Assert(!Planner.Create(f.Source, f.Target, allowOverwrite: true).CanApply);
+});
 foreach (var invalid in new[] { "null", "[]", "{}", "{", "", "\0\0", "{\"x\":1,\"x\":2}" })
     Test("invalid JSON/structure " + JsonSerializer.Serialize(invalid), () => { var f = Setup(); File.WriteAllText(f.Source, invalid); Assert(!State.Inspect(f.Source).Valid); Assert(!Planner.Create(f.Source, f.Target).CanApply); });
 Test("missing vs null vs wrong type", () => {
