@@ -1,0 +1,16 @@
+{
+  "local-projects": {
+    "proj-a": {"name":"Example A", "rootPaths":["C:\\example\\a"]},
+    "proj-b": {"name":"Example B", "rootPaths":["C:\\example\\b"]},
+    "proj-c": {"name":"Example C", "rootPaths":["C:\\example\\c"]}
+  },
+  "project-order": ["proj-a", "proj-b", "proj-c"],
+  "app-server-project-id-by-legacy-project-id-by-host": {},
+  "thread-project-assignments": {
+    "thread-1":{"projectKind":"local","projectId":"proj-a"},
+    "thread-2":{"projectKind":"local","projectId":"proj-a"},
+    "thread-3":{"projectKind":"local","projectId":"proj-b"},
+    "thread-4":{"projectKind":"local","projectId":"proj-c"}
+  },
+  "unrelated-setting": {"must":"remain unchanged"}
+}

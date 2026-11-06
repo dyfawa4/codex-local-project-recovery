@@ -1,0 +1,7 @@
+{
+  "local-projects": {"proj-a": {"name":"Example A"}},
+  "project-order": ["proj-a"],
+  "thread-project-assignments": {
+    "thread-1": {"projectKind":"local","projectId":"proj-does-not-exist"}
+  }
+}

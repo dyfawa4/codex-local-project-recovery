@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Clpr.Cli/Clpr.Cli.csproj" />
+    <Project Path="src/Clpr.Core/Clpr.Core.csproj" />
+    <Project Path="src/Clpr.Desktop/Clpr.Desktop.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Clpr.Tests/Clpr.Tests.csproj" />
+  </Folder>
+</Solution>
