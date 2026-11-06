@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Path "$package/CLI" -Force | Out-Null
 Copy-Item -LiteralPath "$desktopOutput/Clpr.Desktop.exe" -Destination $package
 Copy-Item -LiteralPath "$cliOutput/Clpr.Cli.exe" -Destination "$package/CLI"
 Copy-Item -LiteralPath README.md,LICENSE,CHANGELOG.md -Destination $package
+Copy-Item -LiteralPath docs/USER_GUIDE.md -Destination "$package/使用指南.md"
 $checksums = @("$package/Clpr.Desktop.exe", "$package/CLI/Clpr.Cli.exe") | ForEach-Object {
     $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256
     $relative = [IO.Path]::GetRelativePath((Resolve-Path $package).Path, $hash.Path).Replace('\','/')
